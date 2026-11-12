@@ -18,61 +18,95 @@ class TracePoint:
 
 
 class TraceAccumulator:
-    """Collect independently delivered trace chunks in point order."""
+    """Collect bounded trace chunks and cache one contiguous generation."""
+
+    MAX_POINTS = 1_000_000
+    MAX_CHUNK_POINTS = 50_000
+    MAX_CHUNKS = 4096
 
     def __init__(self) -> None:
-        """Initialize an empty trace."""
         self._chunks: dict[int, tuple[TracePoint, ...]] = {}
         self._total = 0
+        self._cached_points: tuple[TracePoint, ...] | None = None
+        self._cached_path: str | None = None
 
     @property
     def total(self) -> int:
-        """Return the point count announced by the vacuum."""
         return self._total
 
     @property
     def chunk_count(self) -> int:
-        """Return the number of retained chunks."""
         return len(self._chunks)
+
+    def _assemble(self) -> tuple[TracePoint, ...]:
+        if self._cached_points is None:
+            points: list[TracePoint] = []
+            expected_start = 0
+            for start, chunk in sorted(self._chunks.items()):
+                if start != expected_start:
+                    break
+                points.extend(chunk)
+                expected_start += len(chunk)
+            self._cached_points = tuple(points)
+            self._cached_path = trace_points_to_svg_path(self._cached_points)
+        return self._cached_points
 
     @property
     def points(self) -> list[TracePoint]:
-        """Return the contiguous trace prefix, without bridging missing chunks."""
-        points: list[TracePoint] = []
-        expected_start = 0
-        for start, chunk in sorted(self._chunks.items()):
-            if start != expected_start:
-                break
-            points.extend(chunk)
-            expected_start += len(chunk)
-        return points
+        """Return a defensive copy of the contiguous trace prefix."""
+        return list(self._assemble())
+
+    @property
+    def point_count(self) -> int:
+        return len(self._assemble())
+
+    @property
+    def svg_path(self) -> str | None:
+        self._assemble()
+        return self._cached_path
 
     @property
     def complete(self) -> bool:
-        """Return whether all announced trace points are available."""
-        return len(self.points) >= self._total
+        return self.point_count == self._total
 
-    def update(
-        self, start: int, total: int, points: Iterable[TracePoint]
-    ) -> None:
-        """Insert or replace a trace chunk, resetting at the first chunk."""
-        if start < 0 or total < 0:
-            raise ValueError("Trace offsets and totals must not be negative")
-
-        chunk = tuple(points)
-        if start == 0:
-            self._chunks.clear()
-        self._total = total
-
-        if chunk:
-            self._chunks[start] = chunk
-
-        # A shorter total means stale tail chunks must not survive.
-        self._chunks = {
-            chunk_start: chunk_points
-            for chunk_start, chunk_points in self._chunks.items()
-            if chunk_start < total
+    def update(self, start: int, total: int, points: Iterable[TracePoint]) -> None:
+        """Validate the whole update before replacing retained state."""
+        if type(start) is not int or type(total) is not int:
+            raise ValueError("Trace offsets and totals must be integers")
+        if not 0 <= start <= total <= self.MAX_POINTS:
+            raise ValueError("Trace offsets or total exceed the point bounds")
+        chunk_list: list[TracePoint] = []
+        for point in points:
+            if len(chunk_list) >= min(self.MAX_CHUNK_POINTS, total - start):
+                raise ValueError("Trace chunk exceeds the point bounds")
+            if not isinstance(point, TracePoint):
+                raise TypeError("Invalid trace point")
+            chunk_list.append(point)
+        chunk = tuple(chunk_list)
+        candidate = {} if start == 0 else dict(self._chunks)
+        # A shorter response drops old tails and clips its final retained chunk.
+        candidate = {
+            offset: items[: total - offset]
+            for offset, items in candidate.items()
+            if offset < total
         }
+        if chunk:
+            candidate[start] = chunk
+        else:
+            candidate.pop(start, None)
+        if len(candidate) > self.MAX_CHUNKS:
+            raise ValueError("Trace exceeds the chunk count bound")
+        end = -1
+        for offset, items in sorted(candidate.items()):
+            if offset < end:
+                raise ValueError("Trace chunks must not overlap")
+            end = offset + len(items)
+        if candidate == self._chunks and total == self._total:
+            return
+        self._chunks = candidate
+        self._total = total
+        self._cached_points = None
+        self._cached_path = None
 
 
 def decode_trace_chunk(
@@ -82,7 +116,11 @@ def decode_trace_chunk(
     if not value.strip():
         return []
 
+    if len(value) > 1_000_000:
+        raise ValueError("Encoded trace chunk exceeds the byte bound")
     raw = decompressor(value)
+    if len(raw) > TraceAccumulator.MAX_CHUNK_POINTS * 5:
+        raise ValueError("Decoded trace chunk exceeds the point bound")
     if len(raw) % 5:
         raise ValueError("Invalid trace points length")
 

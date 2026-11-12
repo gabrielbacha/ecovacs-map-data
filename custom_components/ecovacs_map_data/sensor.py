@@ -9,7 +9,6 @@ from typing import Any
 from deebot_client.events import CachedMapInfoEvent, MapTraceEvent, RoomsEvent
 from deebot_client.events.map import PositionsEvent
 from deebot_client.rs.util import decompress_base64_data
-
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -23,7 +22,6 @@ from .geometry import (
     normalize_position_type,
     parse_coordinates,
     rotation_degrees,
-    trace_points_to_svg_path,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -85,7 +83,6 @@ class EcovacsMapGeometrySensor(SensorEntity):
     def extra_state_attributes(self) -> Mapping[str, Any]:
         """Return geometry in a frontend-friendly schema."""
         active_map = next((item for item in self._maps if item["active"]), None)
-        trace_points = self._trace.points
         return {
             "schema_version": 2,
             "rooms": self._rooms,
@@ -94,8 +91,8 @@ class EcovacsMapGeometrySensor(SensorEntity):
             "active_map_name": active_map["name"] if active_map else None,
             "rotation": active_map["rotation"] if active_map else 0,
             "positions": self._positions,
-            "trace_path": trace_points_to_svg_path(trace_points),
-            "trace_point_count": len(trace_points),
+            "trace_path": self._trace.svg_path,
+            "trace_point_count": self._trace.point_count,
             "trace_total_points": self._trace.total,
             "trace_chunk_count": self._trace.chunk_count,
             "trace_complete": self._trace.complete,

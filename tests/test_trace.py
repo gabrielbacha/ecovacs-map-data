@@ -7,10 +7,7 @@ from enum import Enum, auto
 from pathlib import Path
 
 MODULE_PATH = (
-    Path(__file__).parents[1]
-    / "custom_components"
-    / "ecovacs_map_data"
-    / "geometry.py"
+    Path(__file__).parents[1] / "custom_components" / "ecovacs_map_data" / "geometry.py"
 )
 SPEC = importlib.util.spec_from_file_location("ecovacs_map_trace", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -29,9 +26,11 @@ class PositionType(Enum):
 def encode_point(x: int, y: int, *, connected: bool = True) -> bytes:
     """Encode one point in deebot-client's five-byte trace format."""
     flag = 0 if connected else 0x80
-    return x.to_bytes(2, "little", signed=True) + y.to_bytes(
-        2, "little", signed=True
-    ) + bytes([flag])
+    return (
+        x.to_bytes(2, "little", signed=True)
+        + y.to_bytes(2, "little", signed=True)
+        + bytes([flag])
+    )
 
 
 class TraceTests(unittest.TestCase):
@@ -109,6 +108,64 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(trace.total, 0)
         self.assertEqual(trace.chunk_count, 0)
         self.assertTrue(trace.complete)
+
+    def test_cached_path_and_completion_reuse_and_replace(self) -> None:
+        trace = geometry.TraceAccumulator()
+        trace.update(
+            0, 4, [geometry.TracePoint(0, 0, False), geometry.TracePoint(1, 0, True)]
+        )
+        first = trace.svg_path
+        for _ in range(100):
+            self.assertIs(trace.svg_path, first)
+            self.assertEqual(trace.point_count, 2)
+            self.assertFalse(trace.complete)
+        trace.update(3, 4, [geometry.TracePoint(3, 0, True)])
+        self.assertEqual(trace.point_count, 2)
+        trace.update(2, 4, [geometry.TracePoint(2, 0, True)])
+        self.assertEqual(trace.svg_path, "M0 0h1h1h1")
+        self.assertTrue(trace.complete)
+        trace.update(2, 4, [geometry.TracePoint(2, 1, True)])
+        self.assertEqual(trace.svg_path, "M0 0h1l1 1l1 -1")
+        points = trace.points
+        points.clear()
+        self.assertEqual(trace.point_count, 4)
+        trace.update(3, 3, [])
+        self.assertEqual(trace.point_count, 3)
+        self.assertTrue(trace.complete)
+
+    def test_invalid_updates_leave_previous_generation_intact(self) -> None:
+        trace = geometry.TraceAccumulator()
+        trace.update(
+            0, 2, [geometry.TracePoint(0, 0, False), geometry.TracePoint(1, 0, True)]
+        )
+        old = trace.svg_path
+        for start, total, points in [
+            (-1, 2, []),
+            (3, 2, []),
+            (0, 1000001, []),
+            (True, 2, []),
+            (1, 2, [geometry.TracePoint(2, 0, True)] * 2),
+            (1, 2, [geometry.TracePoint(2, 0, True)]),
+        ]:
+            with self.assertRaises(ValueError):
+                trace.update(start, total, points)
+            self.assertIs(trace.svg_path, old)
+        trace.MAX_CHUNKS = 1
+        with self.assertRaisesRegex(ValueError, "chunk count"):
+            trace.update(3, 4, [geometry.TracePoint(3, 0, True)])
+        self.assertIs(trace.svg_path, old)
+        trace.MAX_CHUNK_POINTS = 2
+        yielded = []
+
+        def excessive():
+            for index in range(100):
+                yielded.append(index)
+                yield geometry.TracePoint(index, 0, True)
+
+        with self.assertRaises(ValueError):
+            trace.update(0, 100, excessive())
+        self.assertEqual(len(yielded), 3)
+        self.assertIs(trace.svg_path, old)
 
     def test_position_type_normalization(self) -> None:
         """Only stable public position names reach the sensor attributes."""
